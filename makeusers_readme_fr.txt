@@ -1,0 +1,13 @@
+Le script est écrit dans le langage "CMD", qui est un moyen de donner des commandes à un ordinateur à l'aide d'une interface d'invite de commande. Ce script est conçu pour créer de nouveaux comptes d'utilisateurs sur un réseau informatique.
+
+Lorsque le script s'exécute, la première chose qu'il fait est de vérifier si l'utilisateur qui exécute le script dispose de privilèges d'administrateur. Ceci est important car la création de nouveaux comptes d'utilisateurs nécessite des autorisations administratives. Si l'utilisateur ne dispose pas de privilèges administratifs, le script affichera un message d'erreur et cessera de s'exécuter.
+
+Après cela, le script demandera certaines informations, telles que le nom du domaine où les utilisateurs seront ajoutés, le nom de l'unité d'organisation où les utilisateurs seront créés et le nombre d'utilisateurs que vous souhaitez créer.
+
+Une fois ces informations fournies, le script vérifiera si l'unité d'organisation que vous avez spécifiée existe déjà. Une unité d'organisation est une unité organisationnelle, qui est un objet conteneur dans Active Directory qui peut être utilisé pour regrouper des objets similaires, tels que des comptes d'utilisateurs. Si l'unité d'organisation n'existe pas, le script la créera pour vous.
+
+Ensuite, le script vous demandera si vous souhaitez créer les utilisateurs automatiquement ou à partir d'un fichier CSV. Si vous choisissez de créer les utilisateurs automatiquement, le script générera un nom d'utilisateur pour chaque utilisateur en fonction d'un préfixe que vous fournissez, suivi d'un numéro. Par exemple, si vous saisissez "Utilisateurs" comme préfixe et que vous souhaitez créer 3 utilisateurs, le script créera des noms d'utilisateur tels que "Utilisateurs001", "Utilisateurs002" et "Utilisateurs003". Le script générera également un mot de passe pour chaque utilisateur.
+
+Si vous choisissez de créer des utilisateurs à partir d'un fichier CSV, vous devrez fournir un fichier contenant des informations sur chaque utilisateur, telles que son prénom, son nom, son nom d'utilisateur et son mot de passe. Le script lira chaque ligne du fichier et créera un nouveau compte utilisateur pour chacune.
+
+À la fin du script, il vous demandera si vous souhaitez continuer à créer plus d'utilisateurs ou si vous souhaitez arrêter. Si vous choisissez de continuer, le script vous demandera à nouveau le chemin de l'UO et le nombre d'utilisateurs, puis créera d'autres comptes d'utilisateurs. Si vous choisissez d'arrêter, le script se fermera.
