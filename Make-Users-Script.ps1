@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Interactive AD DS User Manager: Create (auto or CSV), List, Edit, and export CSV templates.
@@ -48,7 +47,12 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
     Invoke-Pause-OnError -Message "The 'ActiveDirectory' PowerShell module is not installed (RSAT / AD DS tools required)." -ExitAfterPause -ExitCode 1
 }
-Import-Module ActiveDirectory
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+}
+catch {
+    Invoke-Pause-OnError -Message "Failed to load the ActiveDirectory module: $($_.Exception.Message)" -ExitAfterPause -ExitCode 1
+}
 
 # 3. Resolve domain details (auto-detect with manual fallback)
 function Get-TargetDomainContext {
@@ -62,6 +66,7 @@ function Get-TargetDomainContext {
         return [PSCustomObject]@{
             DnsRoot           = $dom.DNSRoot
             DistinguishedName = $dom.DistinguishedName
+            Server            = $dom.DNSRoot
         }
     }
     catch {
@@ -72,29 +77,51 @@ function Get-TargetDomainContext {
         return [PSCustomObject]@{
             DnsRoot           = $dnsRoot
             DistinguishedName = ($dcParts -join ',')
+            Server            = $dnsRoot
         }
     }
+}
+
+function Get-TargetOUByName {
+    param(
+        [Parameter(Mandatory)] [string]$OuName,
+        [Parameter(Mandatory)] [string]$DomainDN,
+        [Parameter(Mandatory)] [string]$Server
+    )
+
+    if ($OuName -match '^OU=') {
+        return Get-ADOrganizationalUnit -Identity $OuName -Server $Server -ErrorAction SilentlyContinue
+    }
+
+    $ouMatches = @(Get-ADOrganizationalUnit -Filter * -SearchBase $DomainDN -Server $Server |
+        Where-Object { $_.Name -eq $OuName })
+    if ($ouMatches.Count -gt 1) {
+        throw "Multiple OUs named '$OuName' were found. Specify the OU's distinguished name."
+    }
+    if ($ouMatches.Count -eq 1) {
+        return $ouMatches[0]
+    }
+
+    return $null
 }
 
 function Invoke-Ensure-TargetOU {
     param(
         [Parameter(Mandatory)] [string]$OuName,
-        [Parameter(Mandatory)] [string]$DomainDN
+        [Parameter(Mandatory)] [string]$DomainDN,
+        [Parameter(Mandatory)] [string]$Server
     )
 
-    $directDN = "OU=$OuName,$DomainDN"
-    $ouObj = Get-ADOrganizationalUnit -LDAPFilter "(distinguishedName=$directDN)" -ErrorAction SilentlyContinue
-    if (-not $ouObj) {
-        $ouObj = Get-ADOrganizationalUnit -Filter "Name -eq '$OuName'" -SearchBase $DomainDN -ErrorAction SilentlyContinue | Select-Object -First 1
-    }
+    $ouObj = Get-TargetOUByName -OuName $OuName -DomainDN $DomainDN -Server $Server
 
     if ($ouObj) {
         Write-Host "OU found: $($ouObj.DistinguishedName)" -ForegroundColor Green
         return $ouObj
     }
 
+    $directDN = "OU=$OuName,$DomainDN"
     Write-Host "OU '$OuName' not found. Creating '$directDN'..." -ForegroundColor Yellow
-    $ouObj = New-ADOrganizationalUnit -Name $OuName -Path $DomainDN -PassThru
+    $ouObj = New-ADOrganizationalUnit -Name $OuName -Path $DomainDN -Server $Server -PassThru
     Write-Host "Created OU: $($ouObj.DistinguishedName)" -ForegroundColor Green
     return $ouObj
 }
@@ -126,12 +153,13 @@ function Get-LogonScriptChoice {
 function Invoke-Apply-UserOptions {
     param(
         [Parameter(Mandatory)] [string]$Identity,
+        [Parameter(Mandatory)] [string]$Server,
         [string]$LogonScript,
         [bool]$ChangePasswordAtNextLogon,
         [bool]$PasswordNeverExpires
     )
 
-    $splat = @{ Identity = $Identity }
+    $splat = @{ Identity = $Identity; Server = $Server }
     if (-not [string]::IsNullOrWhiteSpace($LogonScript)) {
         $splat['ScriptPath'] = $LogonScript
     }
@@ -161,20 +189,20 @@ function Invoke-ExportCsvTemplateWorkflow {
             FirstName      = 'Jean'
             LastName       = 'Baptiste'
             SamAccountName = 'jbaptiste'
-            Password       = 'ChangeMe@123!'
+            Password       = ''
         },
         [PSCustomObject]@{
             FirstName      = 'Marie'
             LastName       = 'Pierre'
             SamAccountName = 'mpierre'
-            Password       = 'ChangeMe@123!'
+            Password       = ''
         }
     )
 
     try {
         $templateRows | Export-Csv -LiteralPath $outPath -NoTypeInformation -Encoding UTF8
         Write-Host "CSV model created at '$outPath'." -ForegroundColor Green
-        Write-Host "Columns: FirstName, LastName, SamAccountName, Password" -ForegroundColor Yellow
+        Write-Host "Columns: FirstName, LastName, SamAccountName, Password (fill in a unique password for each user)." -ForegroundColor Yellow
 
         $openFile = Read-Host "Open the CSV template now? [y/N]"
         if ($openFile -match '^(Y|Yes)$') {
@@ -196,7 +224,7 @@ function Invoke-CreateUsersWorkflow {
     }
 
     try {
-        $ouObj = Invoke-Ensure-TargetOU -OuName $ouName -DomainDN $DomainCtx.DistinguishedName
+        $ouObj = Invoke-Ensure-TargetOU -OuName $ouName -DomainDN $DomainCtx.DistinguishedName -Server $DomainCtx.Server
     }
     catch {
         Invoke-Pause-OnError -Message "Failed to verify or create OU '$ouName': $($_.Exception.Message)"
@@ -207,7 +235,7 @@ function Invoke-CreateUsersWorkflow {
 
     $mustChangeInput = Read-Host "User must change password at next logon? [y/N]"
     $mustChange      = $mustChangeInput -match '^(Y|Yes)$'
-    $neverExpires    = -not $mustChange
+    $neverExpires    = $false
 
     $csvPathInput = (Read-Host 'Enter full CSV path (columns: FirstName,LastName,SamAccountName,Password) or leave blank for auto-generate').Trim('"').Trim()
 
@@ -217,22 +245,51 @@ function Invoke-CreateUsersWorkflow {
             return
         }
 
-        $rawLines = Get-Content -LiteralPath $csvPathInput | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-        $firstLine = $rawLines[0].ToLower()
-        if ($firstLine -match 'firstname' -and $firstLine -match 'password') {
-            $rows = Import-Csv -LiteralPath $csvPathInput
+        try {
+            $rawLines = @(Get-Content -LiteralPath $csvPathInput | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($rawLines.Count -eq 0) {
+                Invoke-Pause-OnError -Message "CSV file is empty: $csvPathInput"
+                return
+            }
+
+            $firstRow = $rawLines[0] | ConvertFrom-Csv -Header 'Column1','Column2','Column3','Column4'
+            if ($firstRow.Column1 -eq 'FirstName' -and $firstRow.Column2 -eq 'LastName' -and
+                $firstRow.Column3 -eq 'SamAccountName' -and $firstRow.Column4 -eq 'Password') {
+                $rows = @(Import-Csv -LiteralPath $csvPathInput)
+            }
+            else {
+                $rows = @(Import-Csv -LiteralPath $csvPathInput -Header 'FirstName','LastName','SamAccountName','Password')
+            }
         }
-        else {
-            $rows = Import-Csv -LiteralPath $csvPathInput -Header 'FirstName','LastName','SamAccountName','Password'
+        catch {
+            Invoke-Pause-OnError -Message "Failed to read CSV file '$csvPathInput': $($_.Exception.Message)"
+            return
+        }
+
+        if ($rows.Count -eq 0) {
+            Invoke-Pause-OnError -Message "CSV file contains no user rows: $csvPathInput"
+            return
         }
 
         foreach ($row in $rows) {
-            $fn   = $row.FirstName.Trim()
-            $ln   = $row.LastName.Trim()
-            $sam  = $row.SamAccountName.Trim()
-            $rowpwd  = $row.Password
+            $requiredColumns = @('FirstName', 'LastName', 'SamAccountName', 'Password')
+            $missingColumns = @($requiredColumns | Where-Object { -not $row.PSObject.Properties[$_] })
+            if ($missingColumns.Count -gt 0) {
+                Write-Warning "Skipping a CSV row because required columns are missing: $($missingColumns -join ', ')."
+                continue
+            }
 
-            if (Get-ADUser -Filter "SamAccountName -eq '$sam'" -ErrorAction SilentlyContinue) {
+            $fn      = ([string]$row.FirstName).Trim()
+            $ln      = ([string]$row.LastName).Trim()
+            $sam     = ([string]$row.SamAccountName).Trim()
+            $rowpwd  = [string]$row.Password
+            if ([string]::IsNullOrWhiteSpace($fn) -or [string]::IsNullOrWhiteSpace($ln) -or
+                [string]::IsNullOrWhiteSpace($sam) -or [string]::IsNullOrWhiteSpace($rowpwd)) {
+                Write-Warning "Skipping a CSV row with an empty first name, last name, username, or password."
+                continue
+            }
+
+            if (Get-ADUser -Identity $sam -Server $DomainCtx.Server -ErrorAction SilentlyContinue) {
                 Write-Warning "User '$sam' already exists. Skipping."
                 continue
             }
@@ -250,29 +307,36 @@ function Invoke-CreateUsersWorkflow {
                     -SamAccountName $sam `
                     -UserPrincipalName $upn `
                     -Path $ouObj.DistinguishedName `
+                    -Server $DomainCtx.Server `
                     -AccountPassword $securePwd `
                     -Enabled $true | Out-Null
-
-                Invoke-Apply-UserOptions -Identity $sam -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
-                Write-Host "Created user '$sam' ($display)." -ForegroundColor Green
             }
             catch {
                 Invoke-Pause-OnError -Message "Failed to add user '$sam': $($_.Exception.Message)"
+                continue
+            }
+
+            try {
+                Invoke-Apply-UserOptions -Identity $sam -Server $DomainCtx.Server -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
+                Write-Host "Created user '$sam' ($display)." -ForegroundColor Green
+            }
+            catch {
+                Invoke-Pause-OnError -Message "User '$sam' was created, but applying account options failed: $($_.Exception.Message)"
             }
         }
     }
     else {
-        [int]$count = Read-Host 'Enter number of users to generate (e.g. 1, 10, 50)'
-        if ($count -lt 1) {
-            Invoke-Pause-OnError -Message "Count must be at least 1."
+        $countInput = Read-Host 'Enter number of users to generate (e.g. 1, 10, 50)'
+        [int]$count = 0
+        if (-not [int]::TryParse($countInput, [ref]$count) -or $count -lt 1) {
+            Invoke-Pause-OnError -Message "Count must be a whole number of at least 1."
             return
         }
 
         $prefix = (Read-Host "Enter username prefix [default: $ouName]").Trim()
         if ([string]::IsNullOrWhiteSpace($prefix)) { $prefix = $ouName }
 
-        $plainPwd = Read-Host "Enter default password for generated users"
-        $securePwd = ConvertTo-SecureString $plainPwd -AsPlainText -Force
+        $securePwd = Read-Host "Enter default password for generated users" -AsSecureString
 
         for ($i = 1; $i -le $count; $i++) {
             $uid = $i.ToString("D3")
@@ -280,7 +344,7 @@ function Invoke-CreateUsersWorkflow {
             $display = "$ouName $i"
             $upn = "$sam@$($DomainCtx.DnsRoot)"
 
-            if (Get-ADUser -Filter "SamAccountName -eq '$sam'" -ErrorAction SilentlyContinue) {
+            if (Get-ADUser -Identity $sam -Server $DomainCtx.Server -ErrorAction SilentlyContinue) {
                 Write-Warning "User '$sam' already exists. Skipping."
                 continue
             }
@@ -292,14 +356,21 @@ function Invoke-CreateUsersWorkflow {
                     -SamAccountName $sam `
                     -UserPrincipalName $upn `
                     -Path $ouObj.DistinguishedName `
+                    -Server $DomainCtx.Server `
                     -AccountPassword $securePwd `
                     -Enabled $true | Out-Null
-
-                Invoke-Apply-UserOptions -Identity $sam -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
-                Write-Host "[$i/$count] Created user '$sam' ($display)." -ForegroundColor Green
             }
             catch {
                 Invoke-Pause-OnError -Message "[$i/$count] Failed to add user '$sam': $($_.Exception.Message)"
+                continue
+            }
+
+            try {
+                Invoke-Apply-UserOptions -Identity $sam -Server $DomainCtx.Server -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
+                Write-Host "[$i/$count] Created user '$sam' ($display)." -ForegroundColor Green
+            }
+            catch {
+                Invoke-Pause-OnError -Message "User '$sam' was created, but applying account options failed: $($_.Exception.Message)"
             }
         }
     }
@@ -317,22 +388,34 @@ function Invoke-ListUsersWorkflow {
     $users = @()
 
     if ($mode -eq '1') {
-        $ouName = (Read-Host "Enter OU name (leave blank for entire domain)").Trim()
+        $ouName = (Read-Host "Enter OU name or distinguished name (leave blank for entire domain)").Trim()
         if ([string]::IsNullOrWhiteSpace($ouName)) {
-            $users = Get-ADUser -Filter * -Properties $props | Sort-Object SamAccountName
+            $users = Get-ADUser -Filter * -Server $DomainCtx.Server -Properties $props | Sort-Object SamAccountName
         }
         else {
-            $ouObj = Get-ADOrganizationalUnit -Filter "Name -eq '$ouName'" -SearchBase $DomainCtx.DistinguishedName -ErrorAction SilentlyContinue | Select-Object -First 1
+            try {
+                $ouObj = Get-TargetOUByName -OuName $ouName -DomainDN $DomainCtx.DistinguishedName -Server $DomainCtx.Server
+            }
+            catch {
+                Invoke-Pause-OnError -Message $_.Exception.Message
+                return
+            }
             if (-not $ouObj) {
                 Invoke-Pause-OnError -Message "OU '$ouName' not found."
                 return
             }
-            $users = Get-ADUser -Filter * -SearchBase $ouObj.DistinguishedName -Properties $props | Sort-Object SamAccountName
+            $users = Get-ADUser -Filter * -SearchBase $ouObj.DistinguishedName -Server $DomainCtx.Server -Properties $props | Sort-Object SamAccountName
         }
     }
     elseif ($mode -eq '2') {
         $term = (Read-Host "Enter search text (SamAccountName, GivenName, Surname, or DisplayName)").Trim()
-        $users = Get-ADUser -Filter "SamAccountName -like '*$term*' -or DisplayName -like '*$term*' -or GivenName -like '*$term*' -or Surname -like '*$term*'" -Properties $props | Sort-Object SamAccountName
+        if ([string]::IsNullOrWhiteSpace($term)) {
+            Invoke-Pause-OnError -Message "Search text cannot be empty."
+            return
+        }
+        $escapedTerm = $term.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29').Replace([string][char]0, '\00')
+        $ldapFilter = "(|(sAMAccountName=*$escapedTerm*)(displayName=*$escapedTerm*)(givenName=*$escapedTerm*)(sn=*$escapedTerm*))"
+        $users = Get-ADUser -LDAPFilter $ldapFilter -Server $DomainCtx.Server -Properties $props | Sort-Object SamAccountName
     }
     else {
         Invoke-Pause-OnError -Message "Invalid selection."
@@ -370,7 +453,7 @@ function Invoke-EditUserWorkflow {
         return
     }
 
-    $user = Get-ADUser -Identity $sam -Properties DisplayName, GivenName, Surname, ScriptPath, Enabled, PasswordNeverExpires, UserPrincipalName -ErrorAction SilentlyContinue
+    $user = Get-ADUser -Identity $sam -Server $DomainCtx.Server -Properties DisplayName, GivenName, Surname, ScriptPath, Enabled, PasswordNeverExpires, UserPrincipalName -ErrorAction SilentlyContinue
     if (-not $user) {
         Invoke-Pause-OnError -Message "User '$sam' was not found in Active Directory."
         return
@@ -398,6 +481,7 @@ function Invoke-EditUserWorkflow {
 
     try {
         $setParams = @{ Identity = $user.SamAccountName }
+        $setParams['Server'] = $DomainCtx.Server
         $hasFieldChanges = $false
 
         if (-not [string]::IsNullOrWhiteSpace($newDisplay)) { $setParams['DisplayName'] = $newDisplay.Trim(); $hasFieldChanges = $true }
@@ -439,7 +523,7 @@ function Invoke-EditUserWorkflow {
 
         if (-not [string]::IsNullOrWhiteSpace($newPwd)) {
             $sec = ConvertTo-SecureString $newPwd -AsPlainText -Force
-            Set-ADAccountPassword -Identity $user.SamAccountName -NewPassword $sec -Reset
+            Set-ADAccountPassword -Identity $user.SamAccountName -Server $DomainCtx.Server -NewPassword $sec -Reset
         }
 
         Write-Host "Successfully updated '$($user.SamAccountName)'." -ForegroundColor Green
