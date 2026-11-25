@@ -1,11 +1,17 @@
 @echo off
 net.exe session 1>NUL 2>NUL || (Echo Users Maker Script " Access denied " { please run as administrator }. & pause & exit /b 1)
 
-where dsadd 1>NUL 2>NUL || (Echo Users Maker Script " Access denied " { the script must run on a server }. & pause & exit /b 1)
+where dsadd 1>NUL 2>NUL
+if %errorlevel% NEQ 0 echo Sorry, the script must run on a server. & pause & exit /b 1
 
+:setup
+cls
 set ecode=0
 set /p domain=Enter the domain for the new users (e.g. "canado, example, etc."): 
 set /p ext=Enter extention of the domain (e.g. "edu, ht, com, etc."): 
+if "%domain%" EQU "" goto setup
+if "%ext%" EQU "" goto setup
+
 
 :start
 cls
@@ -28,8 +34,7 @@ goto err
 :getscript
 cls
 if "%logonscript%" EQU "" set logonscript=
-set upload=N
-set /p upload=Would you like to place your script in the netlogon folder [Y/N.] : 
+set /p upload=Would you like to upload a script in the netlogon folder [Y/N] : 
 if /i %upload% EQU Y start \\%computername%\netlogon\
 cls
 echo Enter the logon script (e.g. "theScript.bat")
@@ -48,14 +53,13 @@ if %isok% NEQ yes goto getscript
 set /p mustchpwd=User must change password at next logon [Y/N] : 
 if /i %mustchpwd% NEQ Y set mustchpwd=N
 
-
 :getcsv
 cls
 echo Adding the users list...
 set csvfile=auto
 echo Enter the full path of the CSV file (e.g. "C:\Users\JohnDoe\Documents\newusers.csv")
 echo  (csv.model. firstname, lastname, username, password)
-echo NB : use "Tab" or "Shift + Tab" to autocompleate the file path
+echo NB : use "Tab" ^& "Shift + Tab" to autocompleate the file path
 set /p csvfile=Live blank to generate users automatically : 
 
 
@@ -88,8 +92,7 @@ set username=%pref%%uid%
 set password=%pass%
 
 set msg=Sorry, failed to add user "%username%".
-dsadd user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -samid %username% -upn %username%@%domain%.%ext% -display "%cname%" -pwd %password% -disabled no
-if /i "%logonscript%" NEQ "" dsmod user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -loscr "%logonscript%"
+dsadd user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -samid %username% -upn %username%@%domain%.%ext% -display "%cname%" -pwd %password% -loscr "%logonscript%" -disabled no
 if /i %mustchpwd% EQU Y dsmod user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -mustchpwd yes
 if /i %mustchpwd% EQU N dsmod user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -pwdneverexpires yes
 if %errorlevel% NEQ 0 goto err
@@ -108,8 +111,7 @@ for /f "tokens=1,2,3,4 delims=," %%a in (%csvfile%) do (
     set password=%%d
 
     set msg=Sorry, failed to add user "%username%".
-    dsadd user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -samid %username% -upn %username%@%domain%.%ext% -fn %firstname% -ln %lastname% -display "%firstname% %lastname%" -pwd %password% -disabled no
-    if /i "%logonscript%" NEQ "" dsmod user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -loscr "%logonscript%"
+    dsadd user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -samid %username% -upn %username%@%domain%.%ext% -fn %firstname% -ln %lastname% -display "%firstname% %lastname%" -pwd %password% -loscr "%logonscript%" -disabled no
     if /i %mustchpwd% EQU Y dsmod user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -mustchpwd yes
     if /i %mustchpwd% EQU N dsmod user "cn=%username%,ou=%ou%,dc=%domain%,dc=%ext%" -pwdneverexpires yes
     if %errorlevel% NEQ 0 goto err
