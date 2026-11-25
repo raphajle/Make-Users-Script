@@ -14,7 +14,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Pause-OnError {
+function Invoke-Pause-OnError {
     param(
         [string]$Message,
         [switch]$ExitAfterPause,
@@ -41,12 +41,12 @@ function Pause-OnError {
 # 1. Verify Administrator privileges
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Pause-OnError -Message "Access denied. Please run PowerShell as Administrator." -ExitAfterPause -ExitCode 1
+    Invoke-Pause-OnError -Message "Access denied. Please run PowerShell as Administrator." -ExitAfterPause -ExitCode 1
 }
 
 # 2. Load ActiveDirectory module
 if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-    Pause-OnError -Message "The 'ActiveDirectory' PowerShell module is not installed (RSAT / AD DS tools required)." -ExitAfterPause -ExitCode 1
+    Invoke-Pause-OnError -Message "The 'ActiveDirectory' PowerShell module is not installed (RSAT / AD DS tools required)." -ExitAfterPause -ExitCode 1
 }
 Import-Module ActiveDirectory
 
@@ -76,7 +76,7 @@ function Get-TargetDomainContext {
     }
 }
 
-function Ensure-TargetOU {
+function Invoke-Ensure-TargetOU {
     param(
         [Parameter(Mandatory)] [string]$OuName,
         [Parameter(Mandatory)] [string]$DomainDN
@@ -107,7 +107,7 @@ function Get-LogonScriptChoice {
             Start-Process explorer.exe $netlogonPath
         }
         else {
-            Pause-OnError -Message "Path '$netlogonPath' is not accessible on this machine."
+            Invoke-Pause-OnError -Message "Path '$netlogonPath' is not accessible on this machine."
         }
     }
 
@@ -119,11 +119,11 @@ function Get-LogonScriptChoice {
         if ($scriptName -match '\.(bat|cmd)$') {
             return $scriptName
         }
-        Pause-OnError -Message "Logon script must end with .bat or .cmd (or be left blank)."
+        Invoke-Pause-OnError -Message "Logon script must end with .bat or .cmd (or be left blank)."
     }
 }
 
-function Apply-UserOptions {
+function Invoke-Apply-UserOptions {
     param(
         [Parameter(Mandatory)] [string]$Identity,
         [string]$LogonScript,
@@ -182,7 +182,7 @@ function Invoke-ExportCsvTemplateWorkflow {
         }
     }
     catch {
-        Pause-OnError -Message "Failed to create CSV model: $($_.Exception.Message)"
+        Invoke-Pause-OnError -Message "Failed to create CSV model: $($_.Exception.Message)"
     }
 }
 
@@ -191,15 +191,15 @@ function Invoke-CreateUsersWorkflow {
 
     $ouName = (Read-Host 'Enter target OU name (e.g. "Students", "Sales")').Trim()
     if ([string]::IsNullOrWhiteSpace($ouName)) {
-        Pause-OnError -Message "OU name cannot be empty."
+        Invoke-Pause-OnError -Message "OU name cannot be empty."
         return
     }
 
     try {
-        $ouObj = Ensure-TargetOU -OuName $ouName -DomainDN $DomainCtx.DistinguishedName
+        $ouObj = Invoke-Ensure-TargetOU -OuName $ouName -DomainDN $DomainCtx.DistinguishedName
     }
     catch {
-        Pause-OnError -Message "Failed to verify or create OU '$ouName': $($_.Exception.Message)"
+        Invoke-Pause-OnError -Message "Failed to verify or create OU '$ouName': $($_.Exception.Message)"
         return
     }
 
@@ -213,7 +213,7 @@ function Invoke-CreateUsersWorkflow {
 
     if (-not [string]::IsNullOrWhiteSpace($csvPathInput)) {
         if (-not (Test-Path -LiteralPath $csvPathInput -PathType Leaf)) {
-            Pause-OnError -Message "CSV file not found: $csvPathInput"
+            Invoke-Pause-OnError -Message "CSV file not found: $csvPathInput"
             return
         }
 
@@ -230,7 +230,7 @@ function Invoke-CreateUsersWorkflow {
             $fn   = $row.FirstName.Trim()
             $ln   = $row.LastName.Trim()
             $sam  = $row.SamAccountName.Trim()
-            $pwd  = $row.Password
+            $rowpwd  = $row.Password
 
             if (Get-ADUser -Filter "SamAccountName -eq '$sam'" -ErrorAction SilentlyContinue) {
                 Write-Warning "User '$sam' already exists. Skipping."
@@ -238,7 +238,7 @@ function Invoke-CreateUsersWorkflow {
             }
 
             try {
-                $securePwd = ConvertTo-SecureString $pwd -AsPlainText -Force
+                $securePwd = ConvertTo-SecureString $rowpwd -AsPlainText -Force
                 $upn = "$sam@$($DomainCtx.DnsRoot)"
                 $display = "$fn $ln".Trim()
 
@@ -253,18 +253,18 @@ function Invoke-CreateUsersWorkflow {
                     -AccountPassword $securePwd `
                     -Enabled $true | Out-Null
 
-                Apply-UserOptions -Identity $sam -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
+                Invoke-Apply-UserOptions -Identity $sam -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
                 Write-Host "Created user '$sam' ($display)." -ForegroundColor Green
             }
             catch {
-                Pause-OnError -Message "Failed to add user '$sam': $($_.Exception.Message)"
+                Invoke-Pause-OnError -Message "Failed to add user '$sam': $($_.Exception.Message)"
             }
         }
     }
     else {
         [int]$count = Read-Host 'Enter number of users to generate (e.g. 1, 10, 50)'
         if ($count -lt 1) {
-            Pause-OnError -Message "Count must be at least 1."
+            Invoke-Pause-OnError -Message "Count must be at least 1."
             return
         }
 
@@ -295,11 +295,11 @@ function Invoke-CreateUsersWorkflow {
                     -AccountPassword $securePwd `
                     -Enabled $true | Out-Null
 
-                Apply-UserOptions -Identity $sam -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
+                Invoke-Apply-UserOptions -Identity $sam -LogonScript $logonScript -ChangePasswordAtNextLogon $mustChange -PasswordNeverExpires $neverExpires
                 Write-Host "[$i/$count] Created user '$sam' ($display)." -ForegroundColor Green
             }
             catch {
-                Pause-OnError -Message "[$i/$count] Failed to add user '$sam': $($_.Exception.Message)"
+                Invoke-Pause-OnError -Message "[$i/$count] Failed to add user '$sam': $($_.Exception.Message)"
             }
         }
     }
@@ -324,7 +324,7 @@ function Invoke-ListUsersWorkflow {
         else {
             $ouObj = Get-ADOrganizationalUnit -Filter "Name -eq '$ouName'" -SearchBase $DomainCtx.DistinguishedName -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $ouObj) {
-                Pause-OnError -Message "OU '$ouName' not found."
+                Invoke-Pause-OnError -Message "OU '$ouName' not found."
                 return
             }
             $users = Get-ADUser -Filter * -SearchBase $ouObj.DistinguishedName -Properties $props | Sort-Object SamAccountName
@@ -335,7 +335,7 @@ function Invoke-ListUsersWorkflow {
         $users = Get-ADUser -Filter "SamAccountName -like '*$term*' -or DisplayName -like '*$term*' -or GivenName -like '*$term*' -or Surname -like '*$term*'" -Properties $props | Sort-Object SamAccountName
     }
     else {
-        Pause-OnError -Message "Invalid selection."
+        Invoke-Pause-OnError -Message "Invalid selection."
         return
     }
 
@@ -355,7 +355,7 @@ function Invoke-ListUsersWorkflow {
             Write-Host "Exported $(@($formatted).Count) user(s) to '$outFile'." -ForegroundColor Green
         }
         catch {
-            Pause-OnError -Message "Failed to export CSV to '$outFile': $($_.Exception.Message)"
+            Invoke-Pause-OnError -Message "Failed to export CSV to '$outFile': $($_.Exception.Message)"
         }
     }
 }
@@ -366,13 +366,13 @@ function Invoke-EditUserWorkflow {
     Write-Host "`n--- Edit Existing AD User ---" -ForegroundColor Cyan
     $sam = (Read-Host "Enter the SamAccountName (username) of the user to edit").Trim()
     if ([string]::IsNullOrWhiteSpace($sam)) {
-        Pause-OnError -Message "Username cannot be empty."
+        Invoke-Pause-OnError -Message "Username cannot be empty."
         return
     }
 
     $user = Get-ADUser -Identity $sam -Properties DisplayName, GivenName, Surname, ScriptPath, Enabled, PasswordNeverExpires, UserPrincipalName -ErrorAction SilentlyContinue
     if (-not $user) {
-        Pause-OnError -Message "User '$sam' was not found in Active Directory."
+        Invoke-Pause-OnError -Message "User '$sam' was not found in Active Directory."
         return
     }
 
@@ -445,7 +445,7 @@ function Invoke-EditUserWorkflow {
         Write-Host "Successfully updated '$($user.SamAccountName)'." -ForegroundColor Green
     }
     catch {
-        Pause-OnError -Message "Failed to update '$($user.SamAccountName)': $($_.Exception.Message)"
+        Invoke-Pause-OnError -Message "Failed to update '$($user.SamAccountName)': $($_.Exception.Message)"
     }
 }
 
@@ -471,7 +471,7 @@ while ($true) {
         '4' { Invoke-ExportCsvTemplateWorkflow }
         '5' { $domainCtx = Get-TargetDomainContext }
         '6' { Write-Host "Exiting."; break }
-        default { Pause-OnError -Message "Please enter a number between 1 and 6." }
+        default { Invoke-Pause-OnError -Message "Please enter a number between 1 and 6." }
     }
 
     if ($choice -eq '6') { break }
