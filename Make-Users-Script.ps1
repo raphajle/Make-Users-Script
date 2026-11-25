@@ -4,7 +4,9 @@
 .DESCRIPTION
     Replaces legacy dsadd/dsmod/dsquery batch workflows with native ActiveDirectory
     cmdlets, safer error handling, OU auto-creation, netlogon helper, CSV template
-    generation, and tools to list and edit existing users.
+    generation, and tools to list and edit existing users. CSV imports can route
+    each user to an OU using an optional OU column; blank values use the selected
+    default OU. Automatically generated users are created in the selected OU.
 #>
 
 [CmdletBinding()]
@@ -190,19 +192,21 @@ function Invoke-ExportCsvTemplateWorkflow {
             LastName       = 'Baptiste'
             SamAccountName = 'jbaptiste'
             Password       = ''
+            OU             = 'Students'
         },
         [PSCustomObject]@{
             FirstName      = 'Marie'
             LastName       = 'Pierre'
             SamAccountName = 'mpierre'
             Password       = ''
+            OU             = 'Sales'
         }
     )
 
     try {
         $templateRows | Export-Csv -LiteralPath $outPath -NoTypeInformation -Encoding UTF8
         Write-Host "CSV model created at '$outPath'." -ForegroundColor Green
-        Write-Host "Columns: FirstName, LastName, SamAccountName, Password (fill in a unique password for each user)." -ForegroundColor Yellow
+        Write-Host "Columns: FirstName, LastName, SamAccountName, Password, OU (use an OU name or distinguished name; leave OU blank to use the selected default)." -ForegroundColor Yellow
 
         $openFile = Read-Host "Open the CSV template now? [y/N]"
         if ($openFile -match '^(Y|Yes)$') {
@@ -237,7 +241,7 @@ function Invoke-CreateUsersWorkflow {
     $mustChange      = $mustChangeInput -match '^(Y|Yes)$'
     $neverExpires    = $false
 
-    $csvPathInput = (Read-Host 'Enter full CSV path (columns: FirstName,LastName,SamAccountName,Password) or leave blank for auto-generate').Trim('"').Trim()
+    $csvPathInput = (Read-Host 'Enter full CSV path (columns: FirstName,LastName,SamAccountName,Password, optional OU) or leave blank for auto-generate').Trim('"').Trim()
 
     if (-not [string]::IsNullOrWhiteSpace($csvPathInput)) {
         if (-not (Test-Path -LiteralPath $csvPathInput -PathType Leaf)) {
@@ -252,13 +256,13 @@ function Invoke-CreateUsersWorkflow {
                 return
             }
 
-            $firstRow = $rawLines[0] | ConvertFrom-Csv -Header 'Column1','Column2','Column3','Column4'
+            $firstRow = $rawLines[0] | ConvertFrom-Csv -Header 'Column1','Column2','Column3','Column4','Column5'
             if ($firstRow.Column1 -eq 'FirstName' -and $firstRow.Column2 -eq 'LastName' -and
                 $firstRow.Column3 -eq 'SamAccountName' -and $firstRow.Column4 -eq 'Password') {
                 $rows = @(Import-Csv -LiteralPath $csvPathInput)
             }
             else {
-                $rows = @(Import-Csv -LiteralPath $csvPathInput -Header 'FirstName','LastName','SamAccountName','Password')
+                $rows = @(Import-Csv -LiteralPath $csvPathInput -Header 'FirstName','LastName','SamAccountName','Password','OU')
             }
         }
         catch {
@@ -271,6 +275,7 @@ function Invoke-CreateUsersWorkflow {
             return
         }
 
+        $ouCache = @{}
         foreach ($row in $rows) {
             $requiredColumns = @('FirstName', 'LastName', 'SamAccountName', 'Password')
             $missingColumns = @($requiredColumns | Where-Object { -not $row.PSObject.Properties[$_] })
@@ -289,6 +294,28 @@ function Invoke-CreateUsersWorkflow {
                 continue
             }
 
+            $rowOuName = if ($row.PSObject.Properties['OU']) { ([string]$row.OU).Trim() } else { '' }
+            $targetOuName = if ([string]::IsNullOrWhiteSpace($rowOuName)) { $ouName } else { $rowOuName }
+            if (-not $ouCache.ContainsKey($targetOuName)) {
+                try {
+                    if ($targetOuName -match '^OU=') {
+                        $rowOu = Get-TargetOUByName -OuName $targetOuName -DomainDN $DomainCtx.DistinguishedName -Server $DomainCtx.Server
+                        if (-not $rowOu) {
+                            throw "OU distinguished name '$targetOuName' was not found."
+                        }
+                    }
+                    else {
+                        $rowOu = Invoke-Ensure-TargetOU -OuName $targetOuName -DomainDN $DomainCtx.DistinguishedName -Server $DomainCtx.Server
+                    }
+                    $ouCache[$targetOuName] = $rowOu
+                }
+                catch {
+                    Write-Warning "Skipping user '$sam' because OU '$targetOuName' could not be resolved: $($_.Exception.Message)"
+                    continue
+                }
+            }
+            $rowOu = $ouCache[$targetOuName]
+
             if (Get-ADUser -Identity $sam -Server $DomainCtx.Server -ErrorAction SilentlyContinue) {
                 Write-Warning "User '$sam' already exists. Skipping."
                 continue
@@ -306,7 +333,7 @@ function Invoke-CreateUsersWorkflow {
                     -DisplayName $display `
                     -SamAccountName $sam `
                     -UserPrincipalName $upn `
-                    -Path $ouObj.DistinguishedName `
+                    -Path $rowOu.DistinguishedName `
                     -Server $DomainCtx.Server `
                     -AccountPassword $securePwd `
                     -Enabled $true | Out-Null
@@ -384,7 +411,7 @@ function Invoke-ListUsersWorkflow {
     Write-Host "2. Search users across the entire domain (by name/username)"
     $mode = Read-Host "Choose option [1/2]"
 
-    $props = @('DisplayName', 'UserPrincipalName', 'Enabled', 'ScriptPath', 'PasswordNeverExpires', 'DistinguishedName')
+    $props = @('DisplayName', 'UserPrincipalName', 'Enabled', 'ScriptPath', 'PasswordNeverExpires', 'CanonicalName')
     $users = @()
 
     if ($mode -eq '1') {
@@ -427,7 +454,17 @@ function Invoke-ListUsersWorkflow {
         return
     }
 
-    $formatted = $users | Select-Object SamAccountName, DisplayName, Enabled, ScriptPath, PasswordNeverExpires, UserPrincipalName
+    $formatted = $users | Select-Object SamAccountName, DisplayName,
+        @{ Name = 'OrganizationalUnit'; Expression = {
+            $pathSegments = ([string]$_.CanonicalName -split '/')
+            if ($pathSegments.Count -gt 2) {
+                $pathSegments[1..($pathSegments.Count - 2)] -join '/'
+            }
+            else {
+                ''
+            }
+        } },
+        Enabled, ScriptPath, PasswordNeverExpires, UserPrincipalName
     $formatted | Format-Table -AutoSize
 
     $exportCsv = Read-Host "Export this list to a CSV file? [y/N]"
